@@ -17,7 +17,7 @@ import { ChatService } from './services/ChatService';
 import { GmailService } from './services/GmailService';
 import { TimeService } from './services/TimeService';
 import { PeopleService } from './services/PeopleService';
-import { SlidesService } from './services/SlidesService';
+import { SlidesService, PREDEFINED_LAYOUTS } from './services/SlidesService';
 import { SheetsService } from './services/SheetsService';
 import { GMAIL_SEARCH_MAX_RESULTS } from './utils/constants';
 
@@ -76,6 +76,42 @@ const eventMeetAndAttachmentsSchema = {
       'Google Drive file attachments. IMPORTANT: Providing attachments fully REPLACES any existing attachments on the event (not appended). On updates, pass an empty array to clear all attachments.',
     ),
 };
+
+// Shared schema for Google Slides text-range parameters.
+// A discriminated union on `type` makes the missing-index case unrepresentable:
+// FIXED_RANGE requires both startIndex and endIndex, FROM_START_INDEX requires
+// startIndex, and ALL has no positional fields. Callers cannot construct
+// e.g. { type: 'FIXED_RANGE' } without indices.
+const slidesTextRangeSchema = z
+  .discriminatedUnion('type', [
+    z
+      .object({ type: z.literal('ALL') })
+      .describe('Operate on the entire text content of the object.'),
+    z
+      .object({
+        type: z.literal('FIXED_RANGE'),
+        startIndex: z
+          .number()
+          .describe('Inclusive 0-based start index of the range.'),
+        endIndex: z
+          .number()
+          .describe('Exclusive 0-based end index of the range.'),
+      })
+      .describe('Operate on a specific [startIndex, endIndex) range.'),
+    z
+      .object({
+        type: z.literal('FROM_START_INDEX'),
+        startIndex: z
+          .number()
+          .describe(
+            'Inclusive 0-based start index; the range extends to the end of the text.',
+          ),
+      })
+      .describe('Operate from startIndex to the end of the text.'),
+  ])
+  .describe(
+    'Text range to operate on. One of: { type: "ALL" }, { type: "FIXED_RANGE", startIndex, endIndex }, or { type: "FROM_START_INDEX", startIndex }.',
+  );
 
 // Shared schemas for Gmail tools
 const emailComposeSchema = {
@@ -474,6 +510,380 @@ async function main() {
       },
     },
     slidesService.getSlideThumbnail,
+  );
+
+  registerTool(
+    'slides.create',
+    {
+      description:
+        'Creates a new Google Slides presentation. Returns the presentation ID and URL.',
+      inputSchema: {
+        title: z.string().describe('The title for the new presentation.'),
+      },
+    },
+    slidesService.create,
+  );
+
+  registerTool(
+    'slides.addSlide',
+    {
+      description:
+        'Adds a new slide to a Google Slides presentation. Optionally specify position and layout. Returns the new slideObjectId, which can be used to chain follow-up calls such as slides.addShape or slides.insertText.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        insertionIndex: z
+          .number()
+          .optional()
+          .describe(
+            'The 0-based index where the slide should be inserted. If not specified, the slide is added at the end.',
+          ),
+        layoutId: z
+          .string()
+          .optional()
+          .describe(
+            'The ID of a specific layout to use. Use slides.getMetadata to find available layouts.',
+          ),
+        predefinedLayout: z
+          .enum(PREDEFINED_LAYOUTS)
+          .optional()
+          .describe('A predefined layout type for the new slide.'),
+        objectId: z
+          .string()
+          .optional()
+          .describe(
+            'A user-supplied object ID for the new slide. If not specified, a unique ID is generated.',
+          ),
+      },
+    },
+    slidesService.addSlide,
+  );
+
+  registerTool(
+    'slides.deleteSlide',
+    {
+      description: 'Deletes a slide from a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe(
+            'The object ID of the slide to delete (can be found via slides.getMetadata).',
+          ),
+      },
+    },
+    slidesService.deleteSlide,
+  );
+
+  registerTool(
+    'slides.duplicateSlide',
+    {
+      description:
+        'Duplicates (clones) a slide in a Google Slides presentation. The duplicate is placed immediately after the original.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe(
+            'The object ID of the slide to duplicate (can be found via slides.getMetadata).',
+          ),
+      },
+    },
+    slidesService.duplicateSlide,
+  );
+
+  registerTool(
+    'slides.reorderSlides',
+    {
+      description:
+        'Moves one or more slides to a new position in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectIds: z
+          .array(z.string())
+          .describe('The object IDs of the slides to move.'),
+        insertionIndex: z
+          .number()
+          .describe('The 0-based index where the slides should be moved to.'),
+      },
+    },
+    slidesService.reorderSlides,
+  );
+
+  registerTool(
+    'slides.getSpeakerNotes',
+    {
+      description:
+        'Retrieves the speaker notes for all slides in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+      },
+      ...readOnlyToolProps,
+    },
+    slidesService.getSpeakerNotes,
+  );
+
+  registerTool(
+    'slides.updateSpeakerNotes',
+    {
+      description:
+        'Updates (replaces) the speaker notes for a specific slide in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe(
+            'The object ID of the slide whose speaker notes to update.',
+          ),
+        notes: z
+          .string()
+          .describe(
+            'The new speaker notes text. Pass an empty string to clear the notes.',
+          ),
+      },
+    },
+    slidesService.updateSpeakerNotes,
+  );
+
+  registerTool(
+    'slides.replaceAllText',
+    {
+      description:
+        'Replaces all occurrences of a given text with new text across the entire Google Slides presentation. Useful for template variable replacement. Note: matchCase defaults to true here, which is the opposite of the underlying Google Slides API default — pass matchCase: false explicitly for case-insensitive search.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        findText: z.string().describe('The text to find in the presentation.'),
+        replaceText: z
+          .string()
+          .describe('The text to replace the found text with.'),
+        matchCase: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the search should be case-sensitive (default: true; note this differs from the Google API default of false).',
+          ),
+      },
+    },
+    slidesService.replaceAllText,
+  );
+
+  registerTool(
+    'slides.insertText',
+    {
+      description:
+        'Inserts text into a shape or table cell in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        objectId: z
+          .string()
+          .describe(
+            'The object ID of the shape or table cell to insert text into.',
+          ),
+        text: z.string().describe('The text to insert.'),
+        insertionIndex: z
+          .number()
+          .optional()
+          .describe(
+            'The 0-based index where the text should be inserted (default: 0, the beginning).',
+          ),
+      },
+    },
+    slidesService.insertText,
+  );
+
+  registerTool(
+    'slides.deleteText',
+    {
+      description:
+        'Deletes text from a shape or table cell in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        objectId: z
+          .string()
+          .describe(
+            'The object ID of the shape or table cell to delete text from.',
+          ),
+        range: slidesTextRangeSchema.optional().default({ type: 'ALL' }),
+      },
+    },
+    slidesService.deleteText,
+  );
+
+  registerTool(
+    'slides.addShape',
+    {
+      description:
+        'Adds a shape (e.g., text box, rectangle, ellipse) to a slide in a Google Slides presentation. Coordinates and dimensions are in points (PT).',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe('The object ID of the slide to add the shape to.'),
+        shapeType: z
+          .string()
+          .describe(
+            'The type of shape (e.g., "TEXT_BOX", "RECTANGLE", "ELLIPSE", "ROUND_RECTANGLE", "TRIANGLE", "ARROW_NORTH", "ARROW_EAST", "STAR_5", "CLOUD", "HEART").',
+          ),
+        x: z
+          .number()
+          .describe('The X coordinate of the shape position in points.'),
+        y: z
+          .number()
+          .describe('The Y coordinate of the shape position in points.'),
+        width: z.number().describe('The width of the shape in points.'),
+        height: z.number().describe('The height of the shape in points.'),
+        objectId: z
+          .string()
+          .optional()
+          .describe(
+            'A user-supplied object ID for the new shape. If not specified, a unique ID is generated.',
+          ),
+      },
+    },
+    slidesService.addShape,
+  );
+
+  registerTool(
+    'slides.addImage',
+    {
+      description:
+        'Adds an image from a URL to a slide in a Google Slides presentation. Coordinates and dimensions are in points (PT).',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe('The object ID of the slide to add the image to.'),
+        imageUrl: z
+          .string()
+          .describe(
+            'The URL of the image to insert. Must be publicly accessible over HTTPS. Google requires PNG, JPEG, or GIF format, at most 50MB in size, and at most 25 megapixels.',
+          ),
+        x: z
+          .number()
+          .describe('The X coordinate of the image position in points.'),
+        y: z
+          .number()
+          .describe('The Y coordinate of the image position in points.'),
+        width: z.number().describe('The width of the image in points.'),
+        height: z.number().describe('The height of the image in points.'),
+        objectId: z
+          .string()
+          .optional()
+          .describe(
+            'A user-supplied object ID for the new image. If not specified, a unique ID is generated.',
+          ),
+      },
+    },
+    slidesService.addImage,
+  );
+
+  registerTool(
+    'slides.addTable',
+    {
+      description:
+        'Adds a table to a slide in a Google Slides presentation. Coordinates and dimensions are in points (PT).',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        slideObjectId: z
+          .string()
+          .describe('The object ID of the slide to add the table to.'),
+        rows: z.number().describe('The number of rows in the table.'),
+        columns: z.number().describe('The number of columns in the table.'),
+        x: z
+          .number()
+          .describe('The X coordinate of the table position in points.'),
+        y: z
+          .number()
+          .describe('The Y coordinate of the table position in points.'),
+        width: z.number().describe('The width of the table in points.'),
+        height: z.number().describe('The height of the table in points.'),
+        objectId: z
+          .string()
+          .optional()
+          .describe(
+            'A user-supplied object ID for the new table. If not specified, a unique ID is generated.',
+          ),
+      },
+    },
+    slidesService.addTable,
+  );
+
+  registerTool(
+    'slides.updateTextStyle',
+    {
+      description:
+        'Updates the text style (bold, italic, font size, color, etc.) of text in a shape or table cell in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        objectId: z
+          .string()
+          .describe(
+            'The object ID of the shape or table cell containing the text.',
+          ),
+        style: z
+          .string()
+          .describe(
+            'A JSON string conforming to the Google Slides TextStyle schema (https://developers.google.com/workspace/slides/api/reference/rest/v1/presentations/request#TextStyle). Example: \'{"bold": true, "fontSize": {"magnitude": 18, "unit": "PT"}}\'.',
+          ),
+        fields: z
+          .string()
+          .describe(
+            'A comma-separated field mask listing which TextStyle fields to update. Valid values include: bold, italic, underline, strikethrough, smallCaps, backgroundColor, foregroundColor, fontFamily, fontSize, baselineOffset, weightedFontFamily, link. Use "*" to update every field present in `style`. Any field listed here but absent from `style` is reset to its default.',
+          ),
+        range: slidesTextRangeSchema.optional().default({ type: 'ALL' }),
+      },
+    },
+    slidesService.updateTextStyle,
+  );
+
+  registerTool(
+    'slides.updateShapeProperties',
+    {
+      description:
+        'Updates the properties of a shape (background fill, outline, shadow, etc.) in a Google Slides presentation.',
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe('The ID or URL of the presentation.'),
+        objectId: z.string().describe('The object ID of the shape to update.'),
+        shapeProperties: z
+          .string()
+          .describe(
+            'A JSON string conforming to the Google Slides ShapeProperties schema (https://developers.google.com/workspace/slides/api/reference/rest/v1/presentations.pages/shape#ShapeProperties). Example: \'{"shapeBackgroundFill": {"solidFill": {"color": {"rgbColor": {"red": 1, "green": 0, "blue": 0}}}}}\'.',
+          ),
+        fields: z
+          .string()
+          .describe(
+            'A comma-separated field mask listing which ShapeProperties fields to update. Valid values include: shapeBackgroundFill, outline, shadow, link, contentAlignment, autofit. Use "*" to update every field present in `shapeProperties`. Any field listed here but absent from `shapeProperties` is reset to its default.',
+          ),
+      },
+    },
+    slidesService.updateShapeProperties,
   );
 
   // Sheets tools
